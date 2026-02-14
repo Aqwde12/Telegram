@@ -7,6 +7,8 @@ import json
 import threading
 import logging
 from logging.handlers import RotatingFileHandler
+import shutil
+import re
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "7952549707:AAGiYWBj8pfkrd-KB4XYbfko9jvGYlcaqs8")
@@ -19,7 +21,7 @@ LOG_FILE = "bot_log.txt"
 
 # Настройка логирования
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-log_handler = RotatingFileHandler(LOG_FILE, maxBytes=1024*1024, backupCount=5)  # 1MB на файл, 5 файлов
+log_handler = RotatingFileHandler(LOG_FILE, maxBytes=1024*1024, backupCount=5)
 log_handler.setFormatter(log_formatter)
 
 logger = logging.getLogger('AvitoBot')
@@ -71,25 +73,6 @@ def log_success(message):
     """Запись успешного действия в лог"""
     logger.info(f"SUCCESS: {message}")
     print(f"✅ {message}")
-
-def get_log_file_content(lines=50):
-    """Возвращает последние строки из лог-файла"""
-    try:
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            all_lines = f.readlines()
-            last_lines = all_lines[-lines:]
-            return "".join(last_lines)
-    except:
-        return "Лог-файл не найден"
-
-def send_logs_to_telegram(lines=20):
-    """Отправляет последние логи в Telegram"""
-    logs = get_log_file_content(lines)
-    if logs:
-        msg = f"📋 <b>Последние логи ({lines} строк):</b>\n\n<code>{logs}</code>"
-        send_telegram_message(msg)
-    else:
-        send_telegram_message("❌ Логи не найдены")
 
 def load_config():
     """Загружает конфигурацию"""
@@ -156,16 +139,13 @@ def send_telegram_message(text, keyboard=None):
         log_error(f"Ошибка отправки в Telegram: {e}")
 
 def get_main_keyboard():
-    """Главная клавиатура"""
-    config = load_config()
-    status = "🔴 Остановлен" if not monitoring_active else "🟢 Активен"
-    
+    """Главная клавиатура с кнопкой Логи"""
     keyboard = {
         "keyboard": [
-            [f"▶️ Запустить", f"⏹ Остановить"],
-            [f"⚙️ Настройки", f"📊 Статистика"],
-            [f"📋 Логи", f"🆘 Помощь"],
-            [f"🔄 Очистить логи"]
+            ["▶️ Запустить", "⏹ Остановить"],
+            ["⚙️ Настройки", "📊 Статистика"],
+            ["📋 Логи", "🆘 Помощь"],
+            ["🔄 Очистить логи"]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
@@ -185,15 +165,54 @@ def get_settings_keyboard():
     }
     return keyboard
 
+def send_logs_to_telegram(lines=20):
+    """Отправляет последние строки из лог-файла в Telegram"""
+    try:
+        if not os.path.exists(LOG_FILE):
+            send_telegram_message("📝 Лог-файл еще не создан", get_main_keyboard())
+            return
+            
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+            
+        if not all_lines:
+            send_telegram_message("📝 Лог-файл пуст", get_main_keyboard())
+            return
+            
+        # Берем последние строки
+        last_lines = all_lines[-lines:]
+        
+        # Формируем сообщение
+        log_text = "".join(last_lines)
+        
+        # Если лог слишком длинный, обрезаем
+        if len(log_text) > 3500:
+            log_text = log_text[-3500:]
+            
+        message = f"📋 <b>Последние {len(last_lines)} строк лога:</b>\n\n<code>{log_text}</code>"
+        send_telegram_message(message, get_main_keyboard())
+        
+    except Exception as e:
+        log_error(f"Ошибка чтения лога: {e}")
+        send_telegram_message(f"❌ Ошибка чтения лога: {e}", get_main_keyboard())
+
 def clear_log_file():
     """Очищает лог-файл"""
     try:
+        # Создаем резервную копию
+        if os.path.exists(LOG_FILE):
+            backup_name = f"{LOG_FILE}.backup"
+            shutil.copy2(LOG_FILE, backup_name)
+            log_info(f"Создана резервная копия лога: {backup_name}")
+        
+        # Очищаем файл
         open(LOG_FILE, 'w').close()
         log_info("Лог-файл очищен")
-        send_telegram_message("✅ Лог-файл очищен")
+        send_telegram_message("✅ Лог-файл очищен. Резервная копия сохранена.", get_main_keyboard())
+        
     except Exception as e:
         log_error(f"Ошибка очистки лога: {e}")
-        send_telegram_message(f"❌ Ошибка очистки лога: {e}")
+        send_telegram_message(f"❌ Ошибка очистки лога: {e}", get_main_keyboard())
 
 def show_main_menu():
     """Показывает главное меню"""
@@ -206,7 +225,6 @@ def show_main_menu():
 📊 <b>Статус:</b> {status}
 💰 <b>Цена:</b> {config['min_price']} - {config['max_price']} ₽
 ⏱ <b>Интервал:</b> {config['check_delay']} сек
-📝 <b>Логи:</b> {LOG_FILE}
 
 Выберите действие:
 """
@@ -230,8 +248,6 @@ def show_current_settings():
 ⏱ <b>Интервал:</b> {config['check_delay']} сек
 🔗 <b>URL:</b> 
 {config['avito_url']}
-
-📝 <b>Файл логов:</b> {LOG_FILE}
 """
     send_telegram_message(text, get_settings_keyboard())
 
@@ -241,20 +257,16 @@ def show_statistics():
         with open(SEEN_FILE, "r", encoding="utf-8") as f:
             ads_count = len(f.readlines())
         
-        # Размер лог-файла
-        log_size = os.path.getsize(LOG_FILE) / 1024  # в KB
-        
         text = f"""
 📊 <b>СТАТИСТИКА</b>
 
 📦 <b>Найдено объявлений:</b> {ads_count}
-📝 <b>Размер лога:</b> {log_size:.1f} KB
 🕐 <b>Время работы:</b> {time.strftime('%H:%M %d.%m.%Y')}
 """
         send_telegram_message(text, get_main_keyboard())
     except Exception as e:
         log_error(f"Ошибка статистики: {e}")
-        send_telegram_message("❌ Ошибка получения статистики")
+        send_telegram_message("❌ Ошибка получения статистики", get_main_keyboard())
 
 def show_help():
     """Показывает помощь"""
@@ -268,14 +280,12 @@ def show_help():
 📊 Статистика - показать статистику
 📋 Логи - показать последние 20 строк лога
 🔄 Очистить логи - очистить файл логов
+🆘 Помощь - показать это сообщение
 
 <b>Ввод значений:</b>
-• Цена: "мин макс" (0 3000)
+• Цена: "мин макс" (например: 0 3000)
 • URL: ссылка на Avito
-• Интервал: число секунд
-
-<b>Логирование:</b>
-Все действия записываются в файл {LOG_FILE}
+• Интервал: число секунд (10-3600)
 """
     send_telegram_message(text, get_main_keyboard())
 
@@ -378,17 +388,14 @@ def parse_avito_ads(html, config):
             if meta_price and meta_price.get('content'):
                 try:
                     price = int(float(meta_price['content']))
-                    log_debug(f"Элемент {i}: цена из meta = {price}")
                 except:
                     pass
             
             if price == 0:
                 price_text = item.get_text()
-                import re
                 numbers = re.findall(r'\b\d{4,6}\b', price_text)
                 if numbers:
                     price = int(numbers[0])
-                    log_debug(f"Элемент {i}: цена из текста = {price}")
             
             if config['min_price'] <= price <= config['max_price'] and price > 0:
                 ads.append({
@@ -398,8 +405,6 @@ def parse_avito_ads(html, config):
                     'link': link
                 })
                 log_debug(f"✅ Добавлено: {title[:30]}... {price}₽")
-            else:
-                log_debug(f"⏭️ Цена {price} вне диапазона")
                 
         except Exception as e:
             log_error(f"Ошибка парсинга элемента {i}: {e}")
@@ -479,8 +484,6 @@ def monitoring_loop():
             
             if new_count > 0:
                 log_success(f"Найдено {new_count} новых объявлений")
-            else:
-                log_debug("Новых объявлений не найдено")
             
             # Ждем следующую проверку
             delay = config['check_delay']
