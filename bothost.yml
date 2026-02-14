@@ -11,12 +11,10 @@ run:
     - name: BOT_TOKEN
       value: "7952549707:AAGiYWBj8pfkrd-KB4XYbfko9jvGYlcaqs8"
     - name: ADMIN_ID
-      value: "ВАШ_ID"
+      value: "380924486"
     - name: MIN_PRICE
       value: "0"
     - name: MAX_PRICE
       value: "2300"
     - name: CHECK_DELAY
       value: "60"
-    - name: DETAILED_LOGS
-      value: "True"  # Можно выключить, поставив "False"
