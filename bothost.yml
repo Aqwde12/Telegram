@@ -1,0 +1,20 @@
+build:
+  language: python
+  version: "3.9"
+  dependencies:
+    - requests
+    - beautifulsoup4
+
+run:
+  command: python bot.py
+  environment:
+    - name: BOT_TOKEN
+      value: "7952549707:AAGiYWBj8pfkrd-KB4XYbfko9jvGYlcaqs8"
+    - name: ADMIN_ID
+      value: "380924486"
+    - name: MIN_PRICE
+      value: "0"
+    - name: MAX_PRICE
+      value: "2300"
+    - name: CHECK_DELAY
+      value: "60"
