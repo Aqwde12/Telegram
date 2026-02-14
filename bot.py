@@ -9,6 +9,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import shutil
 import re
+import random
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "7952549707:AAGiYWBj8pfkrd-KB4XYbfko9jvGYlcaqs8")
@@ -42,6 +43,14 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0',
 }
 
 # Глобальные переменные
@@ -144,8 +153,8 @@ def get_main_keyboard():
         "keyboard": [
             ["▶️ Запустить", "⏹ Остановить"],
             ["⚙️ Настройки", "📊 Статистика"],
-            ["📋 Логи", "🆘 Помощь"],
-            ["🔄 Очистить логи"]
+            ["📋 Логи", "📜 Объявления"],
+            ["🔄 Очистить логи", "🆘 Помощь"]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
@@ -166,7 +175,7 @@ def get_settings_keyboard():
     return keyboard
 
 def send_logs_to_telegram(lines=20):
-    """Отправляет последние строки из лог-файла в Telegram"""
+    """Отправляет последние строки из лог-файла в Telegram с статистикой"""
     try:
         if not os.path.exists(LOG_FILE):
             send_telegram_message("📝 Лог-файл еще не создан", get_main_keyboard())
@@ -178,7 +187,20 @@ def send_logs_to_telegram(lines=20):
         if not all_lines:
             send_telegram_message("📝 Лог-файл пуст", get_main_keyboard())
             return
-            
+        
+        # Считаем статистику из лога
+        error_count = 0
+        success_count = 0
+        new_ads_count = 0
+        
+        for line in all_lines[-500:]:
+            if "ERROR" in line:
+                error_count += 1
+            if "SUCCESS" in line:
+                success_count += 1
+            if "НОВОЕ ОБЪЯВЛЕНИЕ" in line:
+                new_ads_count += 1
+        
         # Берем последние строки
         last_lines = all_lines[-lines:]
         
@@ -186,26 +208,73 @@ def send_logs_to_telegram(lines=20):
         log_text = "".join(last_lines)
         
         # Если лог слишком длинный, обрезаем
-        if len(log_text) > 3500:
-            log_text = log_text[-3500:]
-            
-        message = f"📋 <b>Последние {len(last_lines)} строк лога:</b>\n\n<code>{log_text}</code>"
+        if len(log_text) > 3000:
+            log_text = log_text[-3000:]
+        
+        # Добавляем статистику
+        stats = f"""
+📊 <b>СТАТИСТИКА ЛОГА:</b>
+• Новых объявлений: {new_ads_count}
+• Ошибок: {error_count}
+• Успешных операций: {success_count}
+• Всего строк: {len(all_lines)}
+
+"""
+        
+        message = f"{stats}📋 <b>Последние {len(last_lines)} строк лога:</b>\n\n<code>{log_text}</code>"
         send_telegram_message(message, get_main_keyboard())
         
     except Exception as e:
         log_error(f"Ошибка чтения лога: {e}")
         send_telegram_message(f"❌ Ошибка чтения лога: {e}", get_main_keyboard())
 
+def show_new_ads_from_log():
+    """Показывает только новые объявления из лога"""
+    try:
+        if not os.path.exists(LOG_FILE):
+            send_telegram_message("📝 Лог-файл еще не создан", get_main_keyboard())
+            return
+            
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+        
+        # Ищем строки с новыми объявлениями
+        new_ads_lines = []
+        for line in all_lines[-1000:]:
+            if "НОВОЕ ОБЪЯВЛЕНИЕ" in line:
+                new_ads_lines.append(line)
+        
+        if not new_ads_lines:
+            send_telegram_message("📝 В логе нет записей о новых объявлениях", get_main_keyboard())
+            return
+        
+        # Берем последние 10 объявлений
+        last_ads = new_ads_lines[-10:]
+        
+        # Форматируем
+        formatted_ads = "📋 <b>Последние найденные объявления:</b>\n\n"
+        for line in last_ads:
+            # Парсим строку лога
+            parts = line.split(" - ")
+            if len(parts) >= 3:
+                time_part = parts[0]
+                ad_info = parts[2].replace("НОВОЕ ОБЪЯВЛЕНИЕ #", "")
+                formatted_ads += f"🕐 {time_part}\n{ad_info}\n\n"
+        
+        send_telegram_message(formatted_ads, get_main_keyboard())
+        
+    except Exception as e:
+        log_error(f"Ошибка чтения объявлений из лога: {e}")
+        send_telegram_message(f"❌ Ошибка: {e}", get_main_keyboard())
+
 def clear_log_file():
     """Очищает лог-файл"""
     try:
-        # Создаем резервную копию
         if os.path.exists(LOG_FILE):
             backup_name = f"{LOG_FILE}.backup"
             shutil.copy2(LOG_FILE, backup_name)
             log_info(f"Создана резервная копия лога: {backup_name}")
         
-        # Очищаем файл
         open(LOG_FILE, 'w').close()
         log_info("Лог-файл очищен")
         send_telegram_message("✅ Лог-файл очищен. Резервная копия сохранена.", get_main_keyboard())
@@ -279,6 +348,7 @@ def show_help():
 ⚙️ Настройки - открыть меню настроек
 📊 Статистика - показать статистику
 📋 Логи - показать последние 20 строк лога
+📜 Объявления - показать найденные объявления
 🔄 Очистить логи - очистить файл логов
 🆘 Помощь - показать это сообщение
 
@@ -290,15 +360,16 @@ def show_help():
     send_telegram_message(text, get_main_keyboard())
 
 def fetch_ad_details(ad_url):
-    """Загружает описание объявления"""
+    """Загружает описание объявления с задержкой"""
     try:
+        time.sleep(random.uniform(2, 4))
+        
         log_debug(f"Загрузка описания: {ad_url}")
         response = requests.get(ad_url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
         
         description = None
         
-        # Поиск описания
         desc_block = soup.find('div', {'data-marker': 'item-view/item-description'})
         if desc_block:
             text_parts = []
@@ -341,7 +412,6 @@ def parse_avito_ads(html, config):
     
     soup = BeautifulSoup(html, 'html.parser')
     
-    # Поиск объявлений
     items = soup.find_all('div', attrs={'data-marker': 'item'})
     log_info(f"Найдено элементов с data-marker='item': {len(items)}")
     
@@ -358,12 +428,10 @@ def parse_avito_ads(html, config):
         try:
             log_debug(f"Парсинг элемента {i+1}/{len(items)}")
             
-            # ID
             ad_id = (item.get('data-item-id') or 
                     item.get('id') or 
                     f"ad_{i}_{int(time.time())}")
             
-            # Заголовок и ссылка
             title_tag = None
             for selector in [
                 ('a', {'data-marker': 'item-title'}),
@@ -382,7 +450,6 @@ def parse_avito_ads(html, config):
             if link.startswith('/'):
                 link = 'https://www.avito.ru' + link
             
-            # Цена
             price = 0
             meta_price = item.find('meta', {'itemprop': 'price'})
             if meta_price and meta_price.get('content'):
@@ -414,12 +481,13 @@ def parse_avito_ads(html, config):
     return ads
 
 def monitoring_loop():
-    """Основной цикл мониторинга"""
+    """Основной цикл мониторинга с защитой от блокировки"""
     global monitoring_active
     
     log_info("🔄 Запуск цикла мониторинга")
     seen_ads = load_seen_ads()
     check_count = 0
+    error_count = 0
     
     while monitoring_active:
         try:
@@ -428,43 +496,37 @@ def monitoring_loop():
             
             config = load_config()
             
-            # Загружаем страницу
+            time.sleep(random.uniform(5, 10))
+            
             log_debug(f"Загрузка URL: {config['avito_url']}")
             response = requests.get(config['avito_url'], headers=HEADERS, timeout=30)
             log_debug(f"Статус ответа: {response.status_code}")
             
-            if response.status_code != 200:
-                log_error(f"Ошибка HTTP: {response.status_code}")
-                time.sleep(60)
-                continue
-            
-            # Парсим объявления
-            ads = parse_avito_ads(response.text, config)
-            
-            # Проверяем новые
-            new_count = 0
-            for ad in ads:
-                if not monitoring_active:
-                    break
-                    
-                if ad['id'] not in seen_ads:
-                    new_count += 1
-                    log_info(f"НОВОЕ ОБЪЯВЛЕНИЕ #{new_count}: {ad['title'][:50]}... {ad['price']}₽")
-                    
-                    # Загружаем описание
-                    description = fetch_ad_details(ad['link'])
-                    
-                    # Эмодзи цены
-                    if ad['price'] < 1000:
-                        price_emoji = "💚"
-                    elif ad['price'] < 1500:
-                        price_emoji = "💛"
-                    else:
-                        price_emoji = "❤️"
-                    
-                    # Формируем сообщение
-                    current_time = datetime.now().strftime('%H:%M %d.%m')
-                    message = f"""
+            if response.status_code == 200:
+                error_count = 0
+                
+                ads = parse_avito_ads(response.text, config)
+                
+                new_count = 0
+                for ad in ads:
+                    if not monitoring_active:
+                        break
+                        
+                    if ad['id'] not in seen_ads:
+                        new_count += 1
+                        log_info(f"НОВОЕ ОБЪЯВЛЕНИЕ #{new_count}: {ad['title'][:50]}... {ad['price']}₽")
+                        
+                        description = fetch_ad_details(ad['link'])
+                        
+                        if ad['price'] < 1000:
+                            price_emoji = "💚"
+                        elif ad['price'] < 1500:
+                            price_emoji = "💛"
+                        else:
+                            price_emoji = "❤️"
+                        
+                        current_time = datetime.now().strftime('%H:%M %d.%m')
+                        message = f"""
 🔔 <b>НОВОЕ ОБЪЯВЛЕНИЕ!</b>
 
 📱 <b>{ad['title']}</b>
@@ -476,17 +538,40 @@ def monitoring_loop():
 
 🕐 {current_time}
 """
-                    send_telegram_message(message, get_main_keyboard())
-                    
-                    seen_ads.add(ad['id'])
-                    save_seen_ad(ad['id'])
-                    time.sleep(3)
+                        send_telegram_message(message, get_main_keyboard())
+                        
+                        seen_ads.add(ad['id'])
+                        save_seen_ad(ad['id'])
+                        time.sleep(5)
+                
+                if new_count > 0:
+                    log_success(f"Найдено {new_count} новых объявлений")
+                
+                delay = config['check_delay']
+                
+            elif response.status_code == 429:
+                error_count += 1
+                log_error(f"Ошибка 429 (Too Many Requests). Попытка {error_count}")
+                
+                wait_time = min(300 * (2 ** (error_count - 1)), 3600)
+                log_warning(f"Пауза на {wait_time} секунд перед следующей попыткой")
+                
+                if error_count == 1:
+                    send_telegram_message(
+                        "⚠️ Avito временно заблокировал бота.\n"
+                        f"Следующая попытка через {wait_time//60} минут.",
+                        get_main_keyboard()
+                    )
+                
+                time.sleep(wait_time)
+                continue
+                
+            else:
+                error_count += 1
+                log_error(f"Ошибка HTTP: {response.status_code}")
+                time.sleep(60)
+                continue
             
-            if new_count > 0:
-                log_success(f"Найдено {new_count} новых объявлений")
-            
-            # Ждем следующую проверку
-            delay = config['check_delay']
             log_info(f"Следующая проверка через {delay} секунд")
             
             for i in range(delay):
@@ -494,6 +579,14 @@ def monitoring_loop():
                     break
                 time.sleep(1)
                 
+        except requests.exceptions.ConnectionError:
+            log_error("Ошибка соединения. Возможно, проблемы с интернетом")
+            time.sleep(120)
+            
+        except requests.exceptions.Timeout:
+            log_error("Таймаут при загрузке страницы")
+            time.sleep(60)
+            
         except Exception as e:
             log_error(f"Ошибка в цикле мониторинга: {e}")
             time.sleep(60)
@@ -529,7 +622,6 @@ def handle_message(text):
     log_debug(f"Получено сообщение: {text}")
     config = load_config()
     
-    # Команды меню
     if text == "/start":
         show_main_menu()
     
@@ -547,6 +639,9 @@ def handle_message(text):
     
     elif text == "📋 Логи":
         send_logs_to_telegram(20)
+    
+    elif text == "📜 Объявления":
+        show_new_ads_from_log()
     
     elif text == "🔄 Очистить логи":
         clear_log_file()
@@ -586,7 +681,6 @@ def handle_message(text):
     elif text == "◀️ Назад":
         show_main_menu()
     
-    # Обработка ввода значений
     elif ' ' in text and all(p.strip().isdigit() for p in text.split()):
         parts = text.split()
         min_p, max_p = int(parts[0]), int(parts[1])
@@ -641,20 +735,15 @@ def main():
     """Главная функция"""
     log_info("🚀 Бот запускается...")
     
-    # Создаем лог-файл при запуске
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"\n{'='*50}\n")
         f.write(f"Бот запущен: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"{'='*50}\n")
     
-    # Загружаем конфиг
     load_config()
-    
-    # Показываем меню при запуске
     show_main_menu()
     log_success("Бот готов к работе")
     
-    # Основной цикл получения сообщений
     last_update_id = 0
     
     while True:
