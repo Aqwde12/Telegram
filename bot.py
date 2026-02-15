@@ -176,6 +176,85 @@ def save_seen_ad(ad_id):
     with open(SEEN_FILE, "a", encoding="utf-8") as f:
         f.write(ad_id + "\n")
 
+# ================= ФУНКЦИИ ДЛЯ ЛОГОВ =================
+
+def send_logs(chat_id, lines=50):
+    """Отправляет последние N строк логов"""
+    try:
+        log_file = os.path.join(DATA_DIR, 'bot.log')
+        if not os.path.exists(log_file):
+            send_telegram_message(chat_id, "📭 Файл логов не найден", get_main_keyboard())
+            return
+        
+        with open(log_file, 'r', encoding='utf-8') as f:
+            # Читаем все строки
+            all_lines = f.readlines()
+            
+            if not all_lines:
+                send_telegram_message(chat_id, "📭 Лог-файл пуст", get_main_keyboard())
+                return
+            
+            # Берем последние N строк
+            last_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+            
+            # Форматируем для отправки
+            log_text = "".join(last_lines)
+            
+            # Если лог слишком длинный, обрезаем
+            if len(log_text) > 3500:
+                log_text = "..." + log_text[-3500:]
+            
+            # Отправляем
+            send_telegram_message(
+                chat_id, 
+                f"📋 Последние {min(lines, len(all_lines))} строк логов:\n<pre>{log_text}</pre>", 
+                get_main_keyboard(),
+                parse_mode="HTML"
+            )
+            
+    except Exception as e:
+        logger.error(f"Ошибка чтения логов: {e}")
+        send_telegram_message(chat_id, f"❌ Ошибка чтения логов: {e}", get_main_keyboard())
+
+def send_error_logs(chat_id, lines=20):
+    """Отправляет последние строки с ошибками"""
+    try:
+        log_file = os.path.join(DATA_DIR, 'bot.log')
+        if not os.path.exists(log_file):
+            send_telegram_message(chat_id, "📭 Файл логов не найден", get_main_keyboard())
+            return
+        
+        with open(log_file, 'r', encoding='utf-8') as f:
+            # Читаем все строки
+            all_lines = f.readlines()
+            
+            # Фильтруем только ошибки
+            error_lines = [line for line in all_lines if 'ERROR' in line]
+            
+            if not error_lines:
+                send_telegram_message(chat_id, "✅ Ошибок не найдено", get_main_keyboard())
+                return
+            
+            # Берем последние N ошибок
+            last_errors = error_lines[-lines:] if len(error_lines) > lines else error_lines
+            
+            # Форматируем
+            error_text = "".join(last_errors)
+            
+            if len(error_text) > 3500:
+                error_text = "..." + error_text[-3500:]
+            
+            send_telegram_message(
+                chat_id, 
+                f"⚠️ Последние {min(lines, len(error_lines))} ошибок:\n<pre>{error_text}</pre>", 
+                get_main_keyboard(),
+                parse_mode="HTML"
+            )
+            
+    except Exception as e:
+        logger.error(f"Ошибка чтения логов: {e}")
+        send_telegram_message(chat_id, f"❌ Ошибка чтения логов: {e}", get_main_keyboard())
+
 # ================= ФУНКЦИИ ПАРСИНГА =================
 
 def parse_seller_info(soup):
@@ -664,6 +743,11 @@ def show_help(chat_id):
 🔄 Перезапустить - перезапуск
 🆘 Помощь - показать справку
 
+<b>📋 Команды:</b>
+/log - показать последние 50 строк логов
+/log 100 - показать последние 100 строк
+/errors - показать последние 20 ошибок
+
 <b>📊 Оценки в сообщениях:</b>
 💰 Цена: 🟢 ниже рынка / 🟡 рыночная / 🔴 выше рынка
 👤 Продавец: имя и рейтинг (если доступны)
@@ -720,11 +804,27 @@ def handle_input(text, chat_id):
         send_telegram_message(chat_id, "❌ Не понял команду. Используйте кнопки ниже.", get_main_keyboard())
 
 def process_text_message(text, chat_id):
-    """Обрабатывает текстовые сообщения от кнопок"""
+    """Обрабатывает текстовые сообщения от кнопок и команд"""
     global monitoring_active, stop_monitoring, bot_chat_id
     
     bot_chat_id = chat_id
     
+    # Обработка команд с параметрами
+    if text.startswith('/log'):
+        parts = text.split()
+        if len(parts) > 1 and parts[1].isdigit():
+            lines = int(parts[1])
+            lines = min(max(lines, 10), 200)  # Ограничиваем от 10 до 200
+            send_logs(chat_id, lines)
+        else:
+            send_logs(chat_id, 50)  # По умолчанию 50 строк
+        return
+    
+    elif text == '/errors':
+        send_error_logs(chat_id, 20)
+        return
+    
+    # Обработка кнопок
     if text == "🔍 Запустить":
         if not monitoring_active:
             monitoring_active = True
@@ -891,6 +991,8 @@ def webhook():
                 send_start_message(chat_id)
             elif text == "/help":
                 show_help(chat_id)
+            elif text.startswith('/log') or text == '/errors':
+                process_text_message(text, chat_id)
             elif text in ["🔍 Запустить", "⏹ Остановить", "⚙️ Настройки", "📊 Статистика", 
                         "🆘 Помощь", "◀️ Назад", "💰 Цена", "🔗 URL", 
                         "⏱ Интервал", "🔄 Перезапустить"] or text.startswith("📋 Детали:"):
@@ -955,6 +1057,8 @@ def start_polling():
                                 send_start_message(chat_id)
                             elif text == "/help":
                                 show_help(chat_id)
+                            elif text.startswith('/log') or text == '/errors':
+                                process_text_message(text, chat_id)
                             elif text in ["🔍 Запустить", "⏹ Остановить", "⚙️ Настройки", "📊 Статистика", 
                                         "🆘 Помощь", "◀️ Назад", "💰 Цена", "🔗 URL", 
                                         "⏱ Интервал", "🔄 Перезапустить"] or text.startswith("📋 Детали:"):
