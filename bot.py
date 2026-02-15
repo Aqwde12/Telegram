@@ -18,6 +18,29 @@ from logging.handlers import RotatingFileHandler
 # Отключаем предупреждения о SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# ================= НАСТРОЙКИ =================
+
+# 🔥 ВАЖНО: На Bothost настройте переменные окружения!
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '7952549707:AAGiYWBj8pfkrd-KB4XYbfko9jvGYlcaqs8')
+ADMIN_ID = os.environ.get('ADMIN_ID', '380924486')
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')
+WEBHOOK_PORT = int(os.environ.get('PORT', 8080))
+
+DEFAULT_CONFIG = {
+    "avito_url": "https://www.avito.ru/all/telefony/mobilnye_telefony/apple-ASgBAgICAkS0wA3OqzmwwQ2I_Dc?cd=1&s=104",
+    "min_price": 0,
+    "max_price": 2300,
+    "check_delay": 60,
+    "is_active": True,
+    "show_details": True
+}
+
+# На Bothost используем /app/data/ для постоянного хранения
+# Эти папки не очищаются при перезапуске
+DATA_DIR = '/app/data' if os.path.exists('/app/data') else '.'
+CONFIG_FILE = os.path.join(DATA_DIR, "bot_config.json")
+SEEN_FILE = os.path.join(DATA_DIR, "seen_ads.txt")
+
 # ================= НАСТРОЙКИ ЛОГИРОВАНИЯ =================
 LOG_FILE = os.path.join(DATA_DIR, 'bot.log')
 LOG_MAX_SIZE = 5 * 1024 * 1024  # 5 MB
@@ -45,28 +68,6 @@ logger.addHandler(file_handler)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
-
-# ================= НАСТРОЙКИ =================
-
-# 🔥 ВАЖНО: На Bothost настройте переменные окружения!
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '7952549707:AAGiYWBj8pfkrd-KB4XYbfko9jvGYlcaqs8')
-ADMIN_ID = os.environ.get('ADMIN_ID', '380924486')
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')
-WEBHOOK_PORT = int(os.environ.get('PORT', 8080))
-
-DEFAULT_CONFIG = {
-    "avito_url": "https://www.avito.ru/all/telefony/mobilnye_telefony/apple-ASgBAgICAkS0wA3OqzmwwQ2I_Dc?cd=1&s=104",
-    "min_price": 0,
-    "max_price": 2300,
-    "check_delay": 60,
-    "is_active": True,
-    "show_details": True
-}
-
-# На Bothost используем /app/data/ для постоянного хранения
-DATA_DIR = '/app/data' if os.path.exists('/app/data') else '.'
-CONFIG_FILE = os.path.join(DATA_DIR, "bot_config.json")
-SEEN_FILE = os.path.join(DATA_DIR, "seen_ads.txt")
 
 # ================= СТРУКТУРЫ ДАННЫХ =================
 
@@ -430,6 +431,7 @@ def get_latest_ads(config):
 
 def format_ad_message(ad, description=None, seller_info=None, price_badge_text=None):
     """Форматирует объявление с информацией о продавце и цене"""
+    config = load_config()
     
     # Базовая информация
     if ad['price'] < 1000:
