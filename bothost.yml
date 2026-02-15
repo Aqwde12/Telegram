@@ -1,9 +1,10 @@
 build:
   language: python
-  version: "3.9"
+  version: "3.9"  # Уже указано, всё ок
   dependencies:
     - requests
     - beautifulsoup4
+    - flask  # flask уже есть в requirements.txt, но можно и тут
 
 run:
   command: python bot.py
