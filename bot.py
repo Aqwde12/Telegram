@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
 }
 
 # На Bothost используем /app/data/ для постоянного хранения
+# Эти папки не очищаются при перезапуске
 DATA_DIR = '/app/data' if os.path.exists('/app/data') else '.'
 CONFIG_FILE = os.path.join(DATA_DIR, "bot_config.json")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_ads.txt")
@@ -68,28 +69,6 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# ================= СПИСОК USER-AGENT ДЛЯ РОТАЦИИ =================
-USER_AGENTS = [
-    # Windows + Chrome
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
-    
-    # Windows + Firefox
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
-    
-    # macOS + Safari
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15',
-    
-    # macOS + Chrome
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    
-    # Linux + Chrome
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-]
-
 # ================= СТРУКТУРЫ ДАННЫХ =================
 
 @dataclass
@@ -97,63 +76,6 @@ class SellerInfo:
     """Информация о продавце"""
     rating: Optional[float]
     name: Optional[str] = None
-
-# ================= МОНИТОРИНГ ЗДОРОВЬЯ ПАРСЕРА =================
-
-class AvitoHealthMonitor:
-    """Мониторит, не сломался ли парсер"""
-    
-    def __init__(self):
-        self.failed_requests = 0
-        self.successful_requests = 0
-        self.last_success_time = datetime.now()
-        self.consecutive_failures = 0
-        self.alert_sent = False
-        
-    def record_success(self):
-        """Записывает успешный запрос"""
-        self.successful_requests += 1
-        self.last_success_time = datetime.now()
-        self.consecutive_failures = 0
-        self.alert_sent = False
-        
-    def record_failure(self):
-        """Записывает неудачный запрос"""
-        self.failed_requests += 1
-        self.consecutive_failures += 1
-        
-        # Если 5 неудач подряд - возможно, Avito изменил верстку
-        if self.consecutive_failures >= 5 and not self.alert_sent and ADMIN_ID:
-            self.alert_admin()
-            self.alert_sent = True
-            
-    def get_success_rate(self):
-        """Возвращает процент успешных запросов"""
-        total = self.failed_requests + self.successful_requests
-        if total == 0:
-            return 100.0
-        return (self.successful_requests / total) * 100
-        
-    def alert_admin(self):
-        """Отправляет предупреждение админу"""
-        message = f"""
-⚠️ <b>ВНИМАНИЕ! Возможны проблемы с парсингом Avito</b>
-
-📊 Статистика:
-✅ Успешных запросов: {self.successful_requests}
-❌ Неудачных запросов: {self.failed_requests}
-📈 Процент успеха: {self.get_success_rate():.1f}%
-
-🕐 Последний успешный запрос: {self.last_success_time.strftime('%H:%M:%S')}
-
-Возможные причины:
-• Avito мог изменить верстку
-• IP адрес мог быть заблокирован
-• Проблемы с сетью
-        """
-        
-        # Отправляем админу
-        send_telegram_message(ADMIN_ID, message, get_main_keyboard())
 
 # ================= ОСНОВНЫЕ ПЕРЕМЕННЫЕ =================
 
@@ -165,152 +87,26 @@ is_bot_running = False
 monitoring_active = False
 stop_monitoring = False
 bot_chat_id = None
-health_monitor = AvitoHealthMonitor()
 
-# ================= ФУНКЦИИ ДЛЯ ЗАЩИТЫ ОТ БЛОКИРОВОК =================
+# Сессия с улучшенными настройками
+session = requests.Session()
+session.verify = False
+session.trust_env = False
 
-def get_random_headers(referer=None):
-    """Генерирует заголовки как у реального браузера"""
-    
-    # Базовые заголовки, которые отправляет почти любой браузер
-    headers = {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0',
-        'User-Agent': random.choice(USER_AGENTS),
-    }
-    
-    # Если переходим по ссылке с другой страницы
-    if referer:
-        headers['Referer'] = referer
-        headers['Sec-Fetch-Site'] = 'same-origin'
-    
-    # Иногда добавляем случайные заголовки
-    if random.random() > 0.7:
-        headers['DNT'] = '1'
-    
-    return headers
-
-def create_advanced_session():
-    """Создает сессию с продвинутыми настройками для имитации браузера"""
-    
-    session = requests.Session()
-    session.verify = False
-    
-    # Настраиваем повторные попытки
-    retry_strategy = urllib3.Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["HEAD", "GET", "OPTIONS"]
-    )
-    
-    adapter = requests.adapters.HTTPAdapter(
-        max_retries=retry_strategy,
-        pool_connections=10,
-        pool_maxsize=10
-    )
-    
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    
-    return session
-
-def smart_request(url, max_retries=5, is_detailed_page=False):
-    """
-    Умный запрос к Avito с защитой от блокировок
-    """
-    global session
-    
-    # Определяем referer и задержку в зависимости от типа страницы
-    if is_detailed_page:
-        referer = "https://www.avito.ru/"
-        base_delay = random.uniform(5, 8)
-    else:
-        referer = "https://www.avito.ru/"
-        base_delay = random.uniform(3, 6)
-    
-    # Случайная задержка перед запросом
-    delay = base_delay * random.uniform(0.8, 1.2)
-    logger.info(f"⏳ Ожидание {delay:.1f} сек перед запросом...")
-    time.sleep(delay)
-    
-    # Получаем свежие заголовки
-    headers = get_random_headers(referer)
-    
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"🌐 Запрос {url[:50]}... (попытка {attempt + 1}/{max_retries})")
-            
-            response = session.get(
-                url, 
-                headers=headers, 
-                timeout=30,
-                allow_redirects=True
-            )
-            
-            # Анализируем ответ
-            if response.status_code == 200:
-                logger.info(f"✅ Успешно загружено ({len(response.text)} символов)")
-                health_monitor.record_success()
-                return response
-                
-            elif response.status_code == 429:
-                # Too Many Requests - нас засекли!
-                logger.warning(f"⚠ Получен статус 429! Avito нас заметил.")
-                health_monitor.record_failure()
-                
-                # Пробуем найти заголовок Retry-After
-                retry_after = response.headers.get('Retry-After')
-                if retry_after and retry_after.isdigit():
-                    wait_time = int(retry_after) + random.randint(10, 30)
-                else:
-                    wait_time = 60 * (attempt + 1)
-                
-                logger.info(f"😴 Пауза на {wait_time} секунд...")
-                time.sleep(wait_time)
-                
-                # Меняем заголовки для следующей попытки
-                headers = get_random_headers(referer)
-                
-            elif response.status_code in [403, 404]:
-                logger.error(f"❌ Ошибка {response.status_code}")
-                health_monitor.record_failure()
-                return response
-                
-            else:
-                logger.error(f"❌ Неожиданный статус: {response.status_code}")
-                health_monitor.record_failure()
-                time.sleep(30 * (attempt + 1))
-                
-        except requests.exceptions.Timeout:
-            logger.warning(f"⏱ Таймаут (попытка {attempt + 1})")
-            health_monitor.record_failure()
-            time.sleep(20 * (attempt + 1))
-            
-        except requests.exceptions.ConnectionError:
-            logger.warning(f"🔌 Ошибка соединения (попытка {attempt + 1})")
-            health_monitor.record_failure()
-            time.sleep(30 * (attempt + 1))
-            
-        except Exception as e:
-            logger.error(f"❌ Неизвестная ошибка: {e}")
-            health_monitor.record_failure()
-            time.sleep(30)
-    
-    # Если все попытки исчерпаны
-    logger.error(f"💥 Все попытки исчерпаны для URL: {url}")
-    return None
-
-# Создаем продвинутую сессию
-session = create_advanced_session()
+# Заголовки для имитации браузера
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0',
+}
 
 # ================= ФУНКЦИИ РАБОТЫ С ФАЙЛАМИ =================
 
@@ -391,18 +187,24 @@ def send_logs(chat_id, lines=50):
             return
         
         with open(log_file, 'r', encoding='utf-8') as f:
+            # Читаем все строки
             all_lines = f.readlines()
             
             if not all_lines:
                 send_telegram_message(chat_id, "📭 Лог-файл пуст", get_main_keyboard())
                 return
             
+            # Берем последние N строк
             last_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+            
+            # Форматируем для отправки
             log_text = "".join(last_lines)
             
+            # Если лог слишком длинный, обрезаем
             if len(log_text) > 3500:
                 log_text = "..." + log_text[-3500:]
             
+            # Отправляем
             send_telegram_message(
                 chat_id, 
                 f"📋 Последние {min(lines, len(all_lines))} строк логов:\n<pre>{log_text}</pre>", 
@@ -423,14 +225,20 @@ def send_error_logs(chat_id, lines=20):
             return
         
         with open(log_file, 'r', encoding='utf-8') as f:
+            # Читаем все строки
             all_lines = f.readlines()
+            
+            # Фильтруем только ошибки
             error_lines = [line for line in all_lines if 'ERROR' in line]
             
             if not error_lines:
                 send_telegram_message(chat_id, "✅ Ошибок не найдено", get_main_keyboard())
                 return
             
+            # Берем последние N ошибок
             last_errors = error_lines[-lines:] if len(error_lines) > lines else error_lines
+            
+            # Форматируем
             error_text = "".join(last_errors)
             
             if len(error_text) > 3500:
@@ -458,22 +266,21 @@ def parse_seller_info(soup):
     
     try:
         # ========== РЕЙТИНГ ==========
+        # Ищем рейтинг в meta теге
         meta_rating = soup.find('meta', {'itemprop': 'ratingValue'})
         if meta_rating and meta_rating.get('content'):
             rating_text = meta_rating.get('content')
             seller_info.rating = float(rating_text.replace(',', '.'))
             logger.info(f"✅ Найден рейтинг: {seller_info.rating}")
         else:
+            # Ищем span с рейтингом
             rating_spans = soup.find_all('span', string=re.compile(r'\d+[.,]\d+'))
             for span in rating_spans:
                 text = span.get_text(strip=True)
                 if len(text) < 10:
-                    try:
-                        seller_info.rating = float(text.replace(',', '.'))
-                        logger.info(f"✅ Найден рейтинг: {seller_info.rating}")
-                        break
-                    except:
-                        pass
+                    seller_info.rating = float(text.replace(',', '.'))
+                    logger.info(f"✅ Найден рейтинг: {seller_info.rating}")
+                    break
         
         # ========== ИМЯ ПРОДАВЦА ==========
         name_elem = soup.find('div', {'data-marker': 'seller-info/name'})
@@ -491,12 +298,12 @@ def parse_seller_info(soup):
 def extract_price_badge(soup):
     """Ищет бейдж цены на странице объявления"""
     
-    # Способ 1: Ищем по data-marker
+    # Способ 1: Ищем по любому data-marker который начинается с "badge-title"
     badge_elem = soup.find('div', {'data-marker': re.compile(r'badge-title-\d+')})
     if badge_elem:
         return badge_elem.get_text(strip=True)
     
-    # Способ 2: Ищем по классу
+    # Способ 2: Ищем по классу CardBadge__title
     badge_elem = soup.find('div', class_=re.compile(r'CardBadge__title'))
     if badge_elem:
         return badge_elem.get_text(strip=True)
@@ -539,12 +346,14 @@ def parse_price_badge(badge_text):
 def parse_avito_details(ad_url):
     """Парсит описание, информацию о продавце и бейдж цены"""
     try:
-        logger.info(f"🔍 Загружаю детали объявления...")
+        logger.info(f"🔍 Загружаю детали объявления: {ad_url}")
         
-        response = smart_request(ad_url, is_detailed_page=True)
+        time.sleep(random.uniform(3, 5))
         
-        if not response or response.status_code != 200:
-            logger.error(f"❌ Ошибка загрузки страницы")
+        response = session.get(ad_url, headers=HEADERS, timeout=30)
+        
+        if response.status_code != 200:
+            logger.error(f"❌ Ошибка загрузки страницы: {response.status_code}")
             return None, None, None
         
         soup = BeautifulSoup(response.text, "html.parser")
@@ -589,12 +398,17 @@ def parse_avito_details(ad_url):
 def get_latest_ads(config):
     """Парсит объявления со страницы через requests"""
     try:
-        logger.info(f"🌐 Загружаю страницу: {config['avito_url'][:50]}...")
+        logger.info(f"🌐 Загружаю страницу: {config['avito_url']}")
         
-        response = smart_request(config['avito_url'], is_detailed_page=False)
+        time.sleep(random.uniform(2, 4))
         
-        if not response or response.status_code != 200:
-            logger.error(f"❌ Не удалось загрузить страницу")
+        headers = HEADERS.copy()
+        headers['Referer'] = 'https://www.avito.ru/'
+        
+        response = session.get(config['avito_url'], headers=headers, timeout=30)
+        
+        if response.status_code != 200:
+            logger.error(f"❌ Ошибка загрузки: {response.status_code}")
             return []
         
         soup = BeautifulSoup(response.text, "html.parser")
@@ -767,9 +581,9 @@ def send_telegram_request(method, params=None, json_data=None):
     for attempt in range(max_retries):
         try:
             if json_data:
-                response = requests.post(url, json=json_data, headers=headers, timeout=60)
+                response = session.post(url, json=json_data, headers=headers, timeout=60)
             else:
-                response = requests.get(url, params=params, headers=headers, timeout=60)
+                response = session.get(url, params=params, headers=headers, timeout=60)
             
             if response.status_code == 200:
                 return response.json()
@@ -825,7 +639,7 @@ def send_telegram_message(chat_id, text, keyboard=None, parse_mode="HTML"):
 # ================= КЛАВИАТУРЫ =================
 
 def get_main_keyboard():
-    """Возвращает основную клавиатуру (без кнопки Помощь)"""
+    """Возвращает основную клавиатуру"""
     config = load_config()
     details_status = "Вкл" if config.get("show_details", True) else "Выкл"
     
@@ -833,7 +647,8 @@ def get_main_keyboard():
         "keyboard": [
             ["🔍 Запустить", "⏹ Остановить"],
             ["⚙️ Настройки", "📊 Статистика"],
-            [f"📋 Детали: {details_status}", "🔄 Перезапустить"]
+            [f"📋 Детали: {details_status}", "🔄 Перезапустить"],
+            ["🆘 Помощь"]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
@@ -862,21 +677,12 @@ def get_settings_text():
     status = "✅ Активен" if config.get("is_active", False) else "❌ Остановлен"
     details = "✅ Вкл" if config.get("show_details", True) else "❌ Выкл"
     
-    # Добавляем статистику здоровья парсера
-    health_stats = f"""
-📊 Здоровье парсера:
-   ✅ Успешно: {health_monitor.successful_requests}
-   ❌ Ошибок: {health_monitor.failed_requests}
-   📈 Успешность: {health_monitor.get_success_rate():.1f}%
-"""
-    
     return f"""
 📱 Статус: {status}
 💰 Цена: {config['min_price']} - {config['max_price']} ₽
 ⏱ Интервал между проверками: {config['check_delay']} сек
 📋 Описание: {details}
 🔗 <a href="{config['avito_url']}">Ссылка на поиск</a>
-{health_stats}
 """
 
 def send_start_message(chat_id):
@@ -918,16 +724,39 @@ def show_statistics(chat_id):
 💰 Текущий диапазон: {config['min_price']} - {config['max_price']} ₽
 ⏱ Интервал между проверками: {config['check_delay']} сек
 📋 Описание: {"✅ Вкл" if config.get("show_details", True) else "❌ Выкл"}
-
-<b>Статистика парсера:</b>
-✅ Успешных запросов: {health_monitor.successful_requests}
-❌ Ошибок: {health_monitor.failed_requests}
-📈 Процент успеха: {health_monitor.get_success_rate():.1f}%
-🕐 Последний успех: {health_monitor.last_success_time.strftime('%H:%M:%S')}
-
 🕐 Время работы: {time.strftime('%H:%M %d.%m.%Y')}
 """
     
+    send_telegram_message(chat_id, text, get_main_keyboard())
+
+def show_help(chat_id):
+    """Показывает справку"""
+    text = """
+🆘 <b>Помощь по боту</b>
+
+<b>Кнопки управления:</b>
+🔍 Запустить - начать мониторинг
+⏹ Остановить - остановить мониторинг
+⚙️ Настройки - изменить параметры
+📊 Статистика - показать статистику
+📋 Детали: Вкл/Выкл - вкл/выкл описание
+🔄 Перезапустить - перезапуск
+🆘 Помощь - показать справку
+
+<b>📋 Команды:</b>
+/log - показать последние 50 строк логов
+/log 100 - показать последние 100 строк
+/errors - показать последние 20 ошибок
+
+<b>📊 Оценки в сообщениях:</b>
+💰 Цена: 🟢 ниже рынка / 🟡 рыночная / 🔴 выше рынка
+👤 Продавец: имя и рейтинг (если доступны)
+
+<b>Форматы ввода:</b>
+• Цена: <code>0 3000</code> (мин макс)
+• Интервал: <code>60</code> (одно число в секундах)
+• URL: просто вставьте ссылку
+"""
     send_telegram_message(chat_id, text, get_main_keyboard())
 
 def toggle_details(chat_id):
@@ -985,10 +814,10 @@ def process_text_message(text, chat_id):
         parts = text.split()
         if len(parts) > 1 and parts[1].isdigit():
             lines = int(parts[1])
-            lines = min(max(lines, 10), 200)
+            lines = min(max(lines, 10), 200)  # Ограничиваем от 10 до 200
             send_logs(chat_id, lines)
         else:
-            send_logs(chat_id, 50)
+            send_logs(chat_id, 50)  # По умолчанию 50 строк
         return
     
     elif text == '/errors':
@@ -1042,6 +871,9 @@ def process_text_message(text, chat_id):
         
     elif text == "📊 Статистика":
         show_statistics(chat_id)
+        
+    elif text == "🆘 Помощь":
+        show_help(chat_id)
         
     elif text == "◀️ Назад":
         send_start_message(chat_id)
@@ -1157,10 +989,13 @@ def webhook():
             
             if text == "/start":
                 send_start_message(chat_id)
+            elif text == "/help":
+                show_help(chat_id)
             elif text.startswith('/log') or text == '/errors':
                 process_text_message(text, chat_id)
             elif text in ["🔍 Запустить", "⏹ Остановить", "⚙️ Настройки", "📊 Статистика", 
-                        "◀️ Назад", "💰 Цена", "🔗 URL", "⏱ Интервал", "🔄 Перезапустить"] or text.startswith("📋 Детали:"):
+                        "🆘 Помощь", "◀️ Назад", "💰 Цена", "🔗 URL", 
+                        "⏱ Интервал", "🔄 Перезапустить"] or text.startswith("📋 Детали:"):
                 process_text_message(text, chat_id)
             else:
                 handle_input(text, chat_id)
@@ -1174,15 +1009,7 @@ def webhook():
 @app.route('/health', methods=['GET'])
 def health():
     """Endpoint для проверки здоровья"""
-    return jsonify({
-        "status": "ok", 
-        "monitoring": monitoring_active,
-        "parser_health": {
-            "success": health_monitor.successful_requests,
-            "failed": health_monitor.failed_requests,
-            "success_rate": health_monitor.get_success_rate()
-        }
-    })
+    return jsonify({"status": "ok", "monitoring": monitoring_active})
 
 @app.route('/', methods=['GET'])
 def index():
@@ -1228,10 +1055,13 @@ def start_polling():
                             
                             if text == "/start":
                                 send_start_message(chat_id)
+                            elif text == "/help":
+                                show_help(chat_id)
                             elif text.startswith('/log') or text == '/errors':
                                 process_text_message(text, chat_id)
                             elif text in ["🔍 Запустить", "⏹ Остановить", "⚙️ Настройки", "📊 Статистика", 
-                                        "◀️ Назад", "💰 Цена", "🔗 URL", "⏱ Интервал", "🔄 Перезапустить"] or text.startswith("📋 Детали:"):
+                                        "🆘 Помощь", "◀️ Назад", "💰 Цена", "🔗 URL", 
+                                        "⏱ Интервал", "🔄 Перезапустить"] or text.startswith("📋 Детали:"):
                                 process_text_message(text, chat_id)
                             else:
                                 handle_input(text, chat_id)
