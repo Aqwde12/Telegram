@@ -11,6 +11,8 @@ from urllib.parse import urljoin
 import urllib3
 from datetime import datetime
 from flask import Flask, request, jsonify
+from dataclasses import dataclass
+from typing import Optional
 
 # Отключаем предупреждения о SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -25,11 +27,10 @@ logger = logging.getLogger(__name__)
 # ================= НАСТРОЙКИ =================
 
 # 🔥 ВАЖНО: На Bothost настройте переменные окружения!
-# В панели Bothost -> Настройки проекта -> Переменные окружения
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '7952549707:AAGiYWBj8pfkrd-KB4XYbfko9jvGYlcaqs8')
 ADMIN_ID = os.environ.get('ADMIN_ID', '380924486')
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')  # URL вашего бота на Bothost
-WEBHOOK_PORT = int(os.environ.get('PORT', 8080))  # Bothost автоматически назначает порт
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')
+WEBHOOK_PORT = int(os.environ.get('PORT', 8080))
 
 DEFAULT_CONFIG = {
     "avito_url": "https://www.avito.ru/all/telefony/mobilnye_telefony/apple-ASgBAgICAkS0wA3OqzmwwQ2I_Dc?cd=1&s=104",
@@ -37,18 +38,28 @@ DEFAULT_CONFIG = {
     "max_price": 2300,
     "check_delay": 60,
     "is_active": True,
-    "show_details": True
+    "show_details": True,
+    "show_seller_rating": True  # Новая опция
 }
 
 # На Bothost используем /app/data/ для постоянного хранения
-# Эти папки не очищаются при перезапуске
 DATA_DIR = '/app/data' if os.path.exists('/app/data') else '.'
 CONFIG_FILE = os.path.join(DATA_DIR, "bot_config.json")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_ads.txt")
 
-# =============================================
+# ================= СТРУКТУРЫ ДАННЫХ =================
 
-# Flask приложение для Webhook
+@dataclass
+class SellerInfo:
+    """Информация о продавце"""
+    rating: Optional[float]
+    reviews: Optional[int]
+    account_age_days: Optional[int]
+    name: Optional[str] = None
+    is_verified: bool = False
+
+# ================= ОСНОВНЫЕ ПЕРЕМЕННЫЕ =================
+
 app = Flask(__name__)
 
 # Глобальные переменные
@@ -102,12 +113,9 @@ def load_config():
                 updated = True
                 logger.info(f"🔄 Добавлен недостающий ключ в конфиг: {key}")
         
-        # Конвертируем старый формат интервала (min/max) в новый (одно значение)
         if "check_delay_min" in config and "check_delay_max" in config:
-            # Берем среднее значение
             avg_delay = (config["check_delay_min"] + config["check_delay_max"]) // 2
             config["check_delay"] = avg_delay
-            # Удаляем старые ключи
             del config["check_delay_min"]
             del config["check_delay_max"]
             updated = True
@@ -149,6 +157,451 @@ def save_seen_ad(ad_id):
     with open(SEEN_FILE, "a", encoding="utf-8") as f:
         f.write(ad_id + "\n")
 
+# ================= ФУНКЦИИ ОЦЕНКИ ПРОДАВЦА =================
+
+def calculate_seller_score(info: SellerInfo) -> tuple[str, str]:
+    """
+    Оценивает надежность продавца на основе рейтинга, отзывов и возраста аккаунта.
+    Возвращает (статус, детальная строка)
+    """
+    score = 0
+
+    # Оценка рейтинга
+    if info.rating is not None:
+        if info.rating >= 4.8:
+            score += 2
+        elif info.rating >= 4.5:
+            score += 1
+        elif info.rating < 4.0 and info.rating > 0:
+            score -= 1
+
+    # Оценка количества отзывов
+    if info.reviews is not None:
+        if info.reviews >= 50:
+            score += 2
+        elif info.reviews >= 10:
+            score += 1
+        elif info.reviews >= 5:
+            score += 0
+        elif info.reviews == 0:
+            score -= 1
+        else:
+            score -= 0
+
+    # Оценка возраста аккаунта
+    if info.account_age_days is not None:
+        if info.account_age_days >= 365:
+            score += 1
+        elif info.account_age_days >= 180:
+            score += 0
+        elif info.account_age_days >= 30:
+            score -= 0
+        elif info.account_age_days < 30 and info.account_age_days > 0:
+            score -= 2
+        elif info.account_age_days == 0:
+            score -= 3
+
+    # Бонус за верификацию
+    if info.is_verified:
+        score += 1
+
+    # Итоговый статус
+    if score >= 3:
+        status = "🟢 надёжный"
+    elif score >= 1:
+        status = "🟡 обычный"
+    elif score >= -1:
+        status = "🟠 стоит присмотреться"
+    else:
+        status = "🔴 риск"
+
+    # Собираем детали для отображения
+    details = []
+    
+    if info.rating is not None and info.rating > 0:
+        stars = "⭐" * min(5, int(info.rating))
+        details.append(f"{stars} {info.rating:.1f}")
+    
+    if info.reviews is not None:
+        if info.reviews >= 1000:
+            reviews_text = f"💬 {info.reviews // 1000}к"
+        elif info.reviews >= 100:
+            reviews_text = f"💬 {info.reviews // 100}.{info.reviews % 100 // 10}к"
+        else:
+            reviews_text = f"💬 {info.reviews}"
+        details.append(reviews_text)
+    
+    if info.account_age_days is not None and info.account_age_days > 0:
+        if info.account_age_days >= 365:
+            years = info.account_age_days // 365
+            months = (info.account_age_days % 365) // 30
+            if years >= 2:
+                age_text = f"📅 {years}г"
+            elif months > 0:
+                age_text = f"📅 {years}г {months}мес"
+            else:
+                age_text = f"📅 {years}г"
+        elif info.account_age_days >= 30:
+            months = info.account_age_days // 30
+            age_text = f"📅 {months}мес"
+        else:
+            age_text = f"📅 {info.account_age_days}д"
+        details.append(age_text)
+    elif info.account_age_days == 0:
+        details.append("📅 сегодня")
+
+    detail_text = " · ".join(details) if details else status
+    return status, detail_text
+
+# ================= ФУНКЦИИ ОЦЕНКИ ЦЕНЫ =================
+
+def parse_price_badge(badge_text: str | None) -> str:
+    """
+    Анализирует бейдж цены на Avito (текст "Ниже рынка", "Рыночная", "Выше рынка")
+    """
+    if not badge_text:
+        return "⚪ нет оценки"
+    
+    badge_text = badge_text.lower().strip()
+    
+    if "ниже рынка" in badge_text:
+        return "🟢 ниже рынка"
+    if "выше рынка" in badge_text:
+        return "🔴 выше рынка"
+    if "рыночная" in badge_text or "цена как в магазине" in badge_text:
+        return "🟡 рыночная"
+    
+    if any(word in badge_text for word in ["выгодно", "дешево", "низкая"]):
+        return "🟢 выгодно"
+    if any(word in badge_text for word in ["дорого", "высокая"]):
+        return "🔴 дорого"
+    
+    return "⚪ без оценки"
+
+def build_short_verdict(price_badge: str, seller_detail: str) -> str:
+    """
+    Собирает краткую строку с оценкой цены и продавца
+    """
+    return f"{price_badge} · 👤 {seller_detail}"
+
+# ================= ПАРСИНГ ДЕТАЛЬНОЙ СТРАНИЦЫ =================
+
+def parse_seller_info(soup):
+    """Парсит информацию о продавце со страницы объявления"""
+    seller_info = SellerInfo(
+        rating=None,
+        reviews=None,
+        account_age_days=None,
+        name=None,
+        is_verified=False
+    )
+    
+    try:
+        # Ищем имя продавца
+        name_elem = soup.select_one('div[data-marker="seller-info/name"] a')
+        if name_elem:
+            seller_info.name = name_elem.get_text(strip=True)
+        
+        # Ищем рейтинг продавца
+        rating_elem = soup.select_one('div[data-marker="seller-info/rating"] span')
+        if rating_elem:
+            rating_text = rating_elem.get_text(strip=True)
+            match = re.search(r'(\d+\.?\d*)', rating_text)
+            if match:
+                seller_info.rating = float(match.group(1))
+        
+        # Ищем количество отзывов
+        reviews_elem = soup.select_one('a[data-marker="seller-info/reviews"]')
+        if reviews_elem:
+            reviews_text = reviews_elem.get_text(strip=True)
+            match = re.search(r'(\d+)', reviews_text)
+            if match:
+                seller_info.reviews = int(match.group(1))
+        
+        # Проверяем верификацию
+        verified_elem = soup.select_one('span[data-marker="seller-info/verified"]')
+        if verified_elem:
+            seller_info.is_verified = True
+        
+        # Ищем дату регистрации
+        reg_elem = soup.select_one('div[data-marker="seller-info/registration-date"]')
+        if reg_elem:
+            reg_text = reg_elem.get_text(strip=True)
+            
+            months = {
+                'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4,
+                'мая': 5, 'июня': 6, 'июля': 7, 'августа': 8,
+                'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12
+            }
+            
+            match = re.search(r'с\s+(\w+)\s+(\d{4})', reg_text.lower())
+            if match:
+                month_name = match.group(1)
+                year = int(match.group(2))
+                if month_name in months:
+                    reg_date = datetime(year, months[month_name], 1)
+                    days_old = (datetime.now() - reg_date).days
+                    seller_info.account_age_days = days_old
+                    
+    except Exception as e:
+        logger.error(f"Ошибка парсинга информации о продавце: {e}")
+    
+    return seller_info
+
+def extract_price_badge(soup):
+    """Ищет бейдж цены на странице объявления"""
+    selectors = [
+        'div[data-marker="price-badge"]',
+        'span[class*="price-badge"]',
+        'div[class*="price-badge"]',
+        'span[data-marker*="price"]',
+        'div[data-marker*="price-badge"]'
+    ]
+    
+    for selector in selectors:
+        badge = soup.select_one(selector)
+        if badge:
+            text = badge.get_text(strip=True)
+            if any(keyword in text.lower() for keyword in ["рынок", "ниже", "выше", "выгодно", "дорого"]):
+                return text
+    
+    return None
+
+def parse_avito_details(ad_url):
+    """Парсит описание, информацию о продавце и бейдж цены"""
+    try:
+        logger.info(f"🔍 Загружаю детали объявления: {ad_url}")
+        
+        time.sleep(random.uniform(3, 5))
+        
+        response = session.get(ad_url, headers=HEADERS, timeout=30)
+        
+        if response.status_code != 200:
+            logger.error(f"❌ Ошибка загрузки страницы: {response.status_code}")
+            return None, None, None
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Парсим описание
+        description = ""
+        desc_selectors = [
+            'div[data-marker="item-view/item-description"]',
+            'div.item-description',
+            'div[class*="description"]',
+            'div[class*="Description"]'
+        ]
+        
+        for selector in desc_selectors:
+            desc_elem = soup.select_one(selector)
+            if desc_elem:
+                description = desc_elem.get_text(strip=True)
+                break
+        
+        if not description:
+            text_blocks = soup.find_all(['div', 'p'], text=True)
+            for block in text_blocks:
+                if block and len(block.get_text(strip=True)) > 100:
+                    description = block.get_text(strip=True)
+                    break
+        
+        # Парсим информацию о продавце
+        seller_info = parse_seller_info(soup)
+        
+        # Парсим бейдж цены
+        price_badge_text = extract_price_badge(soup)
+        
+        if description and len(description) > 1000:
+            description = description[:1000] + "..."
+        
+        return description, seller_info, price_badge_text
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при парсинге деталей: {e}")
+        return None, None, None
+
+# ================= ПАРСИНГ СПИСКА ОБЪЯВЛЕНИЙ =================
+
+def get_latest_ads(config):
+    """Парсит объявления со страницы через requests"""
+    try:
+        logger.info(f"🌐 Загружаю страницу: {config['avito_url']}")
+        
+        time.sleep(random.uniform(2, 4))
+        
+        headers = HEADERS.copy()
+        headers['Referer'] = 'https://www.avito.ru/'
+        
+        response = session.get(config['avito_url'], headers=headers, timeout=30)
+        
+        if response.status_code != 200:
+            logger.error(f"❌ Ошибка загрузки: {response.status_code}")
+            return []
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        items = soup.find_all("div", attrs={"data-marker": "item"})
+        
+        if not items:
+            items = soup.find_all("div", class_=re.compile("iva-item"))
+        
+        logger.info(f"📦 Найдено {len(items)} объявлений на странице")
+        
+        ads = []
+        for item in items:
+            try:
+                ad_id = None
+                ad_id = item.get("data-item-id")
+                
+                if not ad_id:
+                    ad_id = item.get("data-id")
+                
+                if not ad_id:
+                    link_tag = item.find("a", href=re.compile(r"\/\d+"))
+                    if link_tag:
+                        href = link_tag.get("href", "")
+                        match = re.search(r"/(\d+)$", href)
+                        if match:
+                            ad_id = match.group(1)
+                
+                title_tag = None
+                price_tag = None
+                
+                title_selectors = [
+                    'a[data-marker="item-title"]',
+                    'h3[itemprop="name"] a',
+                    'a[class*="title"]',
+                    'a[href*="/"]'
+                ]
+                
+                for selector in title_selectors:
+                    title_tag = item.select_one(selector)
+                    if title_tag and title_tag.get_text(strip=True):
+                        break
+                
+                price_selectors = [
+                    'meta[itemprop="price"]',
+                    'span[data-marker*="price"]',
+                    'strong[class*="price"]',
+                    'span[class*="price"]'
+                ]
+                
+                price = 0
+                for selector in price_selectors:
+                    if selector.startswith('meta'):
+                        price_tag = item.select_one(selector)
+                        if price_tag:
+                            price_content = price_tag.get("content")
+                            if price_content and price_content.isdigit():
+                                price = int(price_content)
+                                break
+                    else:
+                        price_tag = item.select_one(selector)
+                        if price_tag:
+                            price_text = price_tag.get_text(strip=True)
+                            price_digits = re.findall(r'\d+', price_text.replace(' ', ''))
+                            if price_digits:
+                                price = int(price_digits[0])
+                                break
+                
+                if not all([ad_id, title_tag, price]):
+                    continue
+                
+                if config['min_price'] <= price <= config['max_price']:
+                    title = title_tag.get_text(strip=True)
+                    
+                    link = title_tag.get("href", "")
+                    if link.startswith("/"):
+                        link = "https://www.avito.ru" + link
+                    
+                    ads.append({
+                        "id": str(ad_id),
+                        "title": title,
+                        "price": price,
+                        "link": link
+                    })
+                    
+            except Exception as e:
+                continue
+        
+        ads.sort(key=lambda x: x['price'])
+        
+        logger.info(f"💰 Найдено {len(ads)} объявлений в заданном диапазоне цен")
+        return ads
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при парсинге: {e}")
+        return []
+
+# ================= ФОРМАТИРОВАНИЕ СООБЩЕНИЙ =================
+
+def format_ad_message_with_analysis(ad, description=None, seller_info=None, price_badge_text=None):
+    """Форматирует объявление с анализом цены и продавца"""
+    config = load_config()
+    
+    # Базовая информация
+    if ad['price'] < 1000:
+        price_emoji = "💚"
+    elif ad['price'] < 1500:
+        price_emoji = "💛"
+    else:
+        price_emoji = "❤️"
+    
+    message = f"""
+🔔 <b>НОВОЕ ОБЪЯВЛЕНИЕ!</b>
+
+📱 <b>{ad['title']}</b>
+{price_emoji} Цена: <b>{ad['price']} ₽</b>
+"""
+    
+    # Добавляем анализ цены и продавца
+    if config.get("show_seller_rating", True):
+        price_badge = parse_price_badge(price_badge_text)
+        
+        if seller_info and (seller_info.rating or seller_info.reviews or seller_info.account_age_days is not None):
+            seller_status, seller_detail = calculate_seller_score(seller_info)
+            
+            # Короткая версия в одну строку
+            short_line = build_short_verdict(price_badge, seller_detail)
+            message += f"{short_line}\n"
+            
+            # Добавляем имя продавца если есть
+            if seller_info.name:
+                message += f"👤 {seller_info.name}\n"
+            
+            # Полная версия под спойлером
+            full_verdict = f"💰 {price_badge}\n👤 {seller_status} ({seller_detail})"
+            if seller_info.is_verified:
+                full_verdict += "\n✅ Продавец верифицирован"
+            message += f"\n||{full_verdict}||\n"
+        else:
+            message += f"{price_badge}\n"
+    
+    # Ссылка
+    message += f"\n🔗 <a href=\"{ad['link']}\">Открыть объявление</a>"
+    
+    # Описание под спойлером
+    if description and config.get("show_details", True):
+        message += f"\n\n||📝 <b>Описание:</b>\n{description}||"
+    
+    message += f"\n🕐 {time.strftime('%H:%M')}"
+    
+    return message
+
+def send_ad_notification(chat_id, ad):
+    """Отправляет уведомление о новом объявлении с анализом"""
+    config = load_config()
+    
+    description = None
+    seller_info = None
+    price_badge_text = None
+    
+    if config.get("show_details", True) or config.get("show_seller_rating", True):
+        logger.info(f"📋 Загружаю детали для объявления {ad['id']}...")
+        description, seller_info, price_badge_text = parse_avito_details(ad['link'])
+    
+    message = format_ad_message_with_analysis(ad, description, seller_info, price_badge_text)
+    send_telegram_message(chat_id, message, get_main_keyboard())
+
 # ================= TELEGRAM ФУНКЦИИ =================
 
 def send_telegram_request(method, params=None, json_data=None):
@@ -189,10 +642,8 @@ def set_webhook():
     
     webhook_url = f"{WEBHOOK_URL}/webhook"
     
-    # Удаляем старый вебхук
     send_telegram_request("deleteWebhook")
     
-    # Устанавливаем новый
     result = send_telegram_request("setWebhook", params={
         "url": webhook_url,
         "allowed_updates": ["message"]
@@ -226,13 +677,14 @@ def get_main_keyboard():
     """Возвращает основную клавиатуру"""
     config = load_config()
     details_status = "Вкл" if config.get("show_details", True) else "Выкл"
+    seller_status = "Вкл" if config.get("show_seller_rating", True) else "Выкл"
     
     return {
         "keyboard": [
             ["🔍 Запустить", "⏹ Остановить"],
             ["⚙️ Настройки", "📊 Статистика"],
-            [f"👁 Детали: {details_status}", "🔄 Перезапустить"],
-            ["🆘 Помощь"]
+            [f"📋 Детали: {details_status}", f"👤 Продавец: {seller_status}"],
+            ["🔄 Перезапустить", "🆘 Помощь"]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
@@ -242,229 +694,17 @@ def get_settings_keyboard():
     """Возвращает клавиатуру для настроек"""
     config = load_config()
     details_status = "✅ Вкл" if config.get("show_details", True) else "❌ Выкл"
+    seller_status = "✅ Вкл" if config.get("show_seller_rating", True) else "❌ Выкл"
     
     return {
         "keyboard": [
             ["💰 Цена", "🔗 URL"],
             ["⏱ Интервал", f"📋 Детали: {details_status}"],
-            ["◀️ Назад"]
+            [f"👤 Продавец: {seller_status}", "◀️ Назад"]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
     }
-
-# ================= ПАРСИНГ AVITO =================
-
-def parse_avito_details(ad_url):
-    """Парсит только описание с детальной страницы объявления"""
-    try:
-        logger.info(f"🔍 Загружаю описание объявления: {ad_url}")
-        
-        # Задержка перед запросом деталей
-        time.sleep(random.uniform(3, 5))
-        
-        response = session.get(ad_url, headers=HEADERS, timeout=30)
-        
-        if response.status_code != 200:
-            logger.error(f"❌ Ошибка загрузки страницы: {response.status_code}")
-            return None
-        
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Ищем описание
-        description = ""
-        desc_selectors = [
-            'div[data-marker="item-view/item-description"]',
-            'div.item-description',
-            'div[class*="description"]',
-            'div[class*="Description"]'
-        ]
-        
-        for selector in desc_selectors:
-            desc_elem = soup.select_one(selector)
-            if desc_elem:
-                description = desc_elem.get_text(strip=True)
-                break
-        
-        if not description:
-            # Пробуем найти описание по тексту
-            text_blocks = soup.find_all(['div', 'p'], text=True)
-            for block in text_blocks:
-                if block and len(block.get_text(strip=True)) > 100:
-                    description = block.get_text(strip=True)
-                    break
-        
-        if description:
-            return description[:1000] + "..." if len(description) > 1000 else description
-        else:
-            return None
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка при парсинге описания: {e}")
-        return None
-
-def get_latest_ads(config):
-    """Парсит объявления со страницы через requests"""
-    try:
-        logger.info(f"🌐 Загружаю страницу: {config['avito_url']}")
-        
-        # Небольшая задержка перед запросом
-        time.sleep(random.uniform(2, 4))
-        
-        # Обновляем заголовки для каждого запроса
-        headers = HEADERS.copy()
-        headers['Referer'] = 'https://www.avito.ru/'
-        
-        response = session.get(config['avito_url'], headers=headers, timeout=30)
-        
-        if response.status_code != 200:
-            logger.error(f"❌ Ошибка загрузки: {response.status_code}")
-            return []
-        
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Ищем объявления
-        items = soup.find_all("div", attrs={"data-marker": "item"})
-        
-        if not items:
-            # Альтернативный поиск
-            items = soup.find_all("div", class_=re.compile("iva-item"))
-        
-        logger.info(f"📦 Найдено {len(items)} объявлений на странице")
-        
-        ads = []
-        for item in items:
-            try:
-                # Пробуем разные способы найти ID
-                ad_id = None
-                
-                # По data-item-id
-                ad_id = item.get("data-item-id")
-                
-                # По data-id
-                if not ad_id:
-                    ad_id = item.get("data-id")
-                
-                # По ссылке
-                if not ad_id:
-                    link_tag = item.find("a", href=re.compile(r"\/\d+"))
-                    if link_tag:
-                        href = link_tag.get("href", "")
-                        match = re.search(r"/(\d+)$", href)
-                        if match:
-                            ad_id = match.group(1)
-                
-                # Поиск заголовка и цены
-                title_tag = None
-                price_tag = None
-                
-                # Ищем заголовок
-                title_selectors = [
-                    'a[data-marker="item-title"]',
-                    'h3[itemprop="name"] a',
-                    'a[class*="title"]',
-                    'a[href*="/"]'
-                ]
-                
-                for selector in title_selectors:
-                    title_tag = item.select_one(selector)
-                    if title_tag and title_tag.get_text(strip=True):
-                        break
-                
-                # Ищем цену
-                price_selectors = [
-                    'meta[itemprop="price"]',
-                    'span[data-marker*="price"]',
-                    'strong[class*="price"]',
-                    'span[class*="price"]'
-                ]
-                
-                price = 0
-                for selector in price_selectors:
-                    if selector.startswith('meta'):
-                        price_tag = item.select_one(selector)
-                        if price_tag:
-                            price_content = price_tag.get("content")
-                            if price_content and price_content.isdigit():
-                                price = int(price_content)
-                                break
-                    else:
-                        price_tag = item.select_one(selector)
-                        if price_tag:
-                            price_text = price_tag.get_text(strip=True)
-                            # Извлекаем цифры из текста цены
-                            price_digits = re.findall(r'\d+', price_text.replace(' ', ''))
-                            if price_digits:
-                                price = int(price_digits[0])
-                                break
-                
-                if not all([ad_id, title_tag, price]):
-                    continue
-                
-                # Проверяем цену по фильтру
-                if config['min_price'] <= price <= config['max_price']:
-                    title = title_tag.get_text(strip=True)
-                    
-                    # Формируем ссылку
-                    link = title_tag.get("href", "")
-                    if link.startswith("/"):
-                        link = "https://www.avito.ru" + link
-                    
-                    ads.append({
-                        "id": str(ad_id),
-                        "title": title,
-                        "price": price,
-                        "link": link
-                    })
-                    
-            except Exception as e:
-                continue
-        
-        # Сортируем по цене
-        ads.sort(key=lambda x: x['price'])
-        
-        logger.info(f"💰 Найдено {len(ads)} объявлений в заданном диапазоне цен")
-        return ads
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка при парсинге: {e}")
-        return []
-
-def format_ad_message_with_details(ad, description=None):
-    """Форматирует объявление с описанием под спойлером"""
-    if ad['price'] < 1000:
-        price_emoji = "💚"
-    elif ad['price'] < 1500:
-        price_emoji = "💛"
-    else:
-        price_emoji = "❤️"
-    
-    message = f"""
-🔔 <b>НОВОЕ ОБЪЯВЛЕНИЕ!</b>
-
-📱 <b>{ad['title']}</b>
-{price_emoji} Цена: <b>{ad['price']} ₽</b>
-🔗 <a href="{ad['link']}">Открыть объявление</a>
-"""
-    
-    if description:
-        message += f"\n\n||📝 <b>Описание:</b>\n{description}||"
-    
-    message += f"\n🕐 {time.strftime('%H:%M')}"
-    
-    return message
-
-def send_ad_notification(chat_id, ad):
-    """Отправляет уведомление о новом объявлении"""
-    config = load_config()
-    
-    description = None
-    if config.get("show_details", True):
-        logger.info(f"📋 Загружаю описание для объявления {ad['id']}...")
-        description = parse_avito_details(ad['link'])
-    
-    message = format_ad_message_with_details(ad, description)
-    send_telegram_message(chat_id, message, get_main_keyboard())
 
 # ================= ОБРАБОТКА КОМАНД =================
 
@@ -473,25 +713,24 @@ def get_settings_text():
     config = load_config()
     status = "✅ Активен" if config.get("is_active", False) else "❌ Остановлен"
     details = "✅ Вкл" if config.get("show_details", True) else "❌ Выкл"
+    seller = "✅ Вкл" if config.get("show_seller_rating", True) else "❌ Выкл"
     
     return f"""
 📱 Статус: {status}
 💰 Цена: {config['min_price']} - {config['max_price']} ₽
 ⏱ Интервал между проверками: {config['check_delay']} сек
-📋 Детали (описание): {details}
+📋 Описание: {details}
+👤 Оценка продавца: {seller}
 🔗 <a href="{config['avito_url']}">Ссылка на поиск</a>
 """
 
 def send_start_message(chat_id):
     """Отправляет стартовое сообщение"""
-    config = load_config()
-    details_status = "✅ Включены" if config.get("show_details", True) else "❌ Отключены"
-    
     text = f"""
 🤖 <b>Avito Мониторинг Бот</b>
 
 Добро пожаловать! Я помогу отслеживать новые объявления на Avito.
-📋 Детали объявлений (описание): {details_status}
+📊 Оцениваю цену и надежность продавца!
 
 <b>Текущие настройки:</b>
 """
@@ -523,7 +762,8 @@ def show_statistics(chat_id):
 📦 Найдено объявлений: {ads_count}
 💰 Текущий диапазон: {config['min_price']} - {config['max_price']} ₽
 ⏱ Интервал между проверками: {config['check_delay']} сек
-📋 Детали (описание): {"✅ Вкл" if config.get("show_details", True) else "❌ Выкл"}
+📋 Описание: {"✅ Вкл" if config.get("show_details", True) else "❌ Выкл"}
+👤 Оценка продавца: {"✅ Вкл" if config.get("show_seller_rating", True) else "❌ Выкл"}
 🕐 Время работы: {time.strftime('%H:%M %d.%m.%Y')}
 """
     
@@ -539,13 +779,14 @@ def show_help(chat_id):
 ⏹ Остановить - остановить мониторинг
 ⚙️ Настройки - изменить параметры
 📊 Статистика - показать статистику
-👁 Детали: Вкл/Выкл - вкл/выкл подробное описание
+📋 Детали: Вкл/Выкл - вкл/выкл описание
+👤 Продавец: Вкл/Выкл - вкл/выкл оценку продавца
 🔄 Перезапустить - перезапуск
 🆘 Помощь - показать справку
 
-<b>📋 Скрытый текст:</b>
-• Описание объявления под спойлером
-• Нажмите на скрытый текст, чтобы развернуть
+<b>📊 Оценки в сообщениях:</b>
+💰 Цена: 🟢 ниже рынка / 🟡 рыночная / 🔴 выше рынка
+👤 Продавец: 🟢 надёжный / 🟡 обычный / 🟠 риск / 🔴 опасно
 
 <b>Форматы ввода:</b>
 • Цена: <code>0 3000</code> (мин макс)
@@ -554,20 +795,24 @@ def show_help(chat_id):
 """
     send_telegram_message(chat_id, text, get_main_keyboard())
 
-def toggle_details(chat_id):
-    """Включает/выключает показ описания объявлений"""
+def toggle_setting(chat_id, setting_name):
+    """Переключает булеву настройку"""
     config = load_config()
-    config["show_details"] = not config.get("show_details", True)
+    config[setting_name] = not config.get(setting_name, True)
     save_config(config)
     
-    status = "включен" if config["show_details"] else "отключен"
-    send_telegram_message(chat_id, f"✅ Показ описания объявлений {status}", get_settings_keyboard())
+    setting_names = {
+        "show_details": "Показ описания",
+        "show_seller_rating": "Оценка продавца"
+    }
+    
+    status = "включен" if config[setting_name] else "отключен"
+    send_telegram_message(chat_id, f"✅ {setting_names.get(setting_name, setting_name)} {status}", get_settings_keyboard())
 
 def handle_input(text, chat_id):
     """Обрабатывает пользовательский ввод"""
     config = load_config()
     
-    # Проверяем ввод диапазона цен (два числа)
     if text.count(' ') == 1 and all(part.strip().isdigit() for part in text.split()):
         parts = text.split()
         min_val, max_val = int(parts[0]), int(parts[1])
@@ -580,10 +825,9 @@ def handle_input(text, chat_id):
         else:
             send_telegram_message(chat_id, "❌ Минимальная цена должна быть меньше максимальной", get_settings_keyboard())
     
-    # Проверяем ввод интервала (одно число)
     elif text.isdigit():
         delay = int(text)
-        if delay >= 10:  # Минимальный интервал 10 секунд
+        if delay >= 10:
             config["check_delay"] = delay
             save_config(config)
             send_telegram_message(chat_id, f"✅ Интервал между проверками установлен: {delay} сек", get_settings_keyboard())
@@ -604,7 +848,6 @@ def process_text_message(text, chat_id):
     """Обрабатывает текстовые сообщения от кнопок"""
     global monitoring_active, stop_monitoring, bot_chat_id
     
-    # Сохраняем chat_id для мониторинга
     bot_chat_id = chat_id
     
     if text == "🔍 Запустить":
@@ -645,8 +888,11 @@ def process_text_message(text, chat_id):
         else:
             send_telegram_message(chat_id, "⚠ Мониторинг не запущен!", get_main_keyboard())
         
-    elif text.startswith("👁 Детали:") or text.startswith("📋 Детали:"):
-        toggle_details(chat_id)
+    elif text.startswith("📋 Детали:"):
+        toggle_setting(chat_id, "show_details")
+        
+    elif text.startswith("👤 Продавец:"):
+        toggle_setting(chat_id, "show_seller_rating")
         
     elif text == "⚙️ Настройки":
         send_settings_menu(chat_id)
@@ -679,24 +925,19 @@ def monitoring_loop(chat_id):
     config = load_config()
     seen_ads = load_seen_ads()
     
-    # Бесконечный цикл мониторинга
     while monitoring_active and not stop_monitoring:
         try:
             logger.info("\n" + "="*50)
             logger.info("🔍 Проверка новых объявлений...")
             
-            # Получаем текущие объявления
             ads = get_latest_ads(config)
             
-            # Фильтруем только новые объявления
             new_ads = [ad for ad in ads if ad["id"] not in seen_ads]
             
             if new_ads:
                 logger.info(f"📬 Найдено {len(new_ads)} новых объявлений")
                 
-                # Отправляем каждое новое объявление с интервалом
                 for i, ad in enumerate(new_ads, 1):
-                    # Проверяем флаг остановки
                     if stop_monitoring or not monitoring_active:
                         logger.info("⏹ Мониторинг остановлен")
                         monitoring_active = False
@@ -704,19 +945,15 @@ def monitoring_loop(chat_id):
                     
                     logger.info(f"  {i}. Отправка: {ad['title']} - {ad['price']}₽")
                     
-                    # Отправляем уведомление
                     send_ad_notification(chat_id, ad)
                     
-                    # Добавляем в просмотренные
                     seen_ads.add(ad["id"])
                     save_seen_ad(ad["id"])
                     
-                    # Если это не последнее объявление, ждем указанный интервал
                     if i < len(new_ads):
                         delay = config['check_delay']
                         logger.info(f"⏳ Ожидание {delay} сек перед следующим объявлением...")
                         
-                        # Ожидание с проверкой флага остановки
                         for _ in range(delay):
                             if stop_monitoring or not monitoring_active:
                                 logger.info("⏹ Мониторинг остановлен во время ожидания")
@@ -726,11 +963,9 @@ def monitoring_loop(chat_id):
             else:
                 logger.info(f"ℹ️ Новых объявлений не найдено")
             
-            # Ждем перед следующей проверкой
             delay = config['check_delay']
             logger.info(f"⏳ Следующая проверка через {delay} сек...")
             
-            # Ожидание с проверкой флага остановки
             for _ in range(delay):
                 if stop_monitoring or not monitoring_active:
                     logger.info("⏹ Мониторинг остановлен во время ожидания")
@@ -754,7 +989,6 @@ def start_monitoring_thread(chat_id):
     """Запускает мониторинг в отдельном потоке"""
     global bot_thread, monitoring_active, stop_monitoring
     
-    # Если есть старый поток, ждем его завершения
     if bot_thread and bot_thread.is_alive():
         stop_monitoring = True
         monitoring_active = False
@@ -787,7 +1021,7 @@ def webhook():
                 show_help(chat_id)
             elif text in ["🔍 Запустить", "⏹ Остановить", "⚙️ Настройки", "📊 Статистика", 
                         "🆘 Помощь", "◀️ Назад", "💰 Цена", "🔗 URL", 
-                        "⏱ Интервал", "🔄 Перезапустить"] or text.startswith("👁 Детали:") or text.startswith("📋 Детали:"):
+                        "⏱ Интервал", "🔄 Перезапустить"] or text.startswith("📋 Детали:") or text.startswith("👤 Продавец:"):
                 process_text_message(text, chat_id)
             else:
                 handle_input(text, chat_id)
@@ -800,7 +1034,7 @@ def webhook():
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Endpoint для проверки здоровья (Bothost мониторинг)"""
+    """Endpoint для проверки здоровья"""
     return jsonify({"status": "ok", "monitoring": monitoring_active})
 
 @app.route('/', methods=['GET'])
@@ -815,7 +1049,7 @@ def index():
 # ================= ЗАПУСК =================
 
 def start_polling():
-    """Запускает polling режим (если webhook не настроен)"""
+    """Запускает polling режим"""
     logger.info("🤖 Запуск в polling режиме...")
     
     offset = 0
@@ -851,7 +1085,7 @@ def start_polling():
                                 show_help(chat_id)
                             elif text in ["🔍 Запустить", "⏹ Остановить", "⚙️ Настройки", "📊 Статистика", 
                                         "🆘 Помощь", "◀️ Назад", "💰 Цена", "🔗 URL", 
-                                        "⏱ Интервал", "🔄 Перезапустить"] or text.startswith("👁 Детали:") or text.startswith("📋 Детали:"):
+                                        "⏱ Интервал", "🔄 Перезапустить"] or text.startswith("📋 Детали:") or text.startswith("👤 Продавец:"):
                                 process_text_message(text, chat_id)
                             else:
                                 handle_input(text, chat_id)
@@ -866,38 +1100,32 @@ def start_polling():
 def main():
     """Главная функция"""
     logger.info("="*60)
-    logger.info("🚀 Avito мониторинг бот (адаптирован для Bothost)")
+    logger.info("🚀 Avito мониторинг бот (с оценкой цен и продавцов)")
     logger.info("="*60)
     
-    # Создаем директорию для данных
     ensure_data_dir()
     
-    # Проверяем токен
     if BOT_TOKEN:
         logger.info("✅ Токен бота загружен")
     
-    # Проверяем ID администратора
     if ADMIN_ID:
         logger.info("✅ ID администратора загружен")
     
-    # Загружаем конфигурацию
     config = load_config()
     
     logger.info(f"\n📋 Текущие настройки:")
     logger.info(f"  • Диапазон цен: {config['min_price']} - {config['max_price']} ₽")
     logger.info(f"  • Интервал: {config['check_delay']} сек")
-    logger.info(f"  • Детали: {'Вкл' if config.get('show_details', True) else 'Выкл'}")
+    logger.info(f"  • Описание: {'Вкл' if config.get('show_details', True) else 'Выкл'}")
+    logger.info(f"  • Оценка продавца: {'Вкл' if config.get('show_seller_rating', True) else 'Выкл'}")
     logger.info(f"  • Данные хранятся в: {DATA_DIR}")
     
-    # Пытаемся установить webhook
     webhook_set = set_webhook()
     
     if webhook_set:
-        # Запускаем Flask сервер для webhook
         logger.info(f"🌐 Запуск webhook сервера на порту {WEBHOOK_PORT}")
         app.run(host='0.0.0.0', port=WEBHOOK_PORT)
     else:
-        # Запускаем polling режим
         logger.info("📱 Запуск в polling режиме...")
         try:
             start_polling()
